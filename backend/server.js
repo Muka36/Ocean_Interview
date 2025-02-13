@@ -21,22 +21,34 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 
 // User Schema
 const UserSchema = new mongoose.Schema({
-  username: String,
-  email: String,
-  password: String
+  username: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
 });
 const User = mongoose.model("User", UserSchema);
 
 // Product Schema
 const ProductSchema = new mongoose.Schema({
-    name: String,
-    price: Number,
-    userId: mongoose.Schema.Types.ObjectId, // Link product to a user
-  });
-  
+  name: String,
+  price: Number,
+  senderId: mongoose.Schema.Types.ObjectId,
+  receiverId: mongoose.Schema.Types.ObjectId,
+});
 const Product = mongoose.model("Product", ProductSchema);
 
-const JWT_SECRET = process.env.JWT_SECRET; // Use env variable in production
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// Middleware to verify JWT token
+const authenticate = (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ error: "Unauthorized - No Token Provided" });
+
+  jwt.verify(token.split(" ")[1], JWT_SECRET, (err, decoded) => {
+    if (err) return res.status(401).json({ error: "Unauthorized - Invalid Token" });
+    req.user = decoded;
+    next();
+  });
+};
 
 // Register API
 app.post("/register", async (req, res) => {
@@ -55,63 +67,68 @@ app.post("/login", async (req, res) => {
     return res.status(400).json({ error: "Invalid credentials" });
   }
   const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
-  res.json({ token });
+  res.json({ token, userId: user._id, username: user.username });
 });
 
-// Middleware to protect routes
-const authenticate = (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  jwt.verify(token.split(" ")[1], JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(401).json({ error: "Invalid token" });
-    req.user = decoded;
-    next();
-  });
-};
-
-// Protected Route Example
-app.get("/dashboard", authenticate, (req, res) => {
-  res.json({ message: "Welcome to the dashboard!", user: req.user });
+// Get all users
+app.get("/users", authenticate, async (req, res) => {
+  try {
+    const users = await User.find({}, "username _id");
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
 });
 
-// Add this API to fetch all products
-app.get("/products", async (req, res) => {
-    try {
-      const products = await Product.find(); // Fetch all products from MongoDB
-      res.json(products);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch products" });
-    }
-  });
-  
-// Delete Product by ID
-app.delete("/products/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const deletedProduct = await Product.findByIdAndDelete(id);
-      
-      if (!deletedProduct) {
-        return res.status(404).json({ error: "Product not found" });
-      }
-  
-      io.emit("delete_product", id); // Notify all clients about product deletion
-      res.json({ message: "Product deleted successfully" });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete product" });
-    }
-  });
-  
+app.get("/products/:senderId/:receiverId", authenticate, async (req, res) => {
+  try {
+    const { senderId, receiverId } = req.params;
+    const products = await Product.find({
+      $or: [
+        { senderId, receiverId },
+        { senderId: receiverId, receiverId: senderId },
+      ],
+    });
+    res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
 
+app.delete("/products/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deletedProduct = await Product.findByIdAndDelete(id);
 
-// WebSocket for Real-Time Updates
+    if (!deletedProduct) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    io.emit("delete_product", id);
+    res.json({ message: "Product deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+
 io.on("connection", (socket) => {
-  console.log("Client connected");
+  console.log("Client connected:", socket.id);
 
   socket.on("add_product", async (data) => {
-    const newProduct = new Product(data);
-    await newProduct.save();
-    io.emit("new_product", newProduct); // Broadcast to all clients
+    try {
+      const newProduct = new Product({
+        name: data.name,
+        price: data.price,
+        senderId: data.senderId,
+        receiverId: data.receiverId,
+      });
+
+      await newProduct.save();
+
+      io.emit("new_product", newProduct);
+    } catch (error) {
+      console.error("Error adding product via WebSocket:", error);
+    }
   });
 
   socket.on("disconnect", () => {
@@ -120,7 +137,7 @@ io.on("connection", (socket) => {
 });
 
 
-  
+
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
