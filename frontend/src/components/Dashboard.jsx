@@ -1,56 +1,100 @@
 import React, { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 import axios from "axios";
-import "../../src/styles.css"; // Import global styles
+import "../../src/styles.css"; 
 
 const socket = io("http://localhost:5000");
 
 const Dashboard = () => {
+  const [users, setUsers] = useState([]);
+  const [selectedUser, setSelectedUser] = useState(null);
   const [products, setProducts] = useState([]);
   const [newProduct, setNewProduct] = useState({ name: "", price: "" });
   const [showModal, setShowModal] = useState(false);
+  const userId = localStorage.getItem("userId");
 
-  // Fetch products from the API when the component loads
   useEffect(() => {
+    if (userId) {
+      socket.emit("user_connected", userId);
+    }
+  }, [userId]);
+
+  // Fetch users for selection
+  useEffect(() => {
+    const fetchUsers = async () => {
+      try {
+        const res = await axios.get("http://localhost:5000/users", {
+          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        });
+        setUsers(res.data);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+      }
+    };
+
+    fetchUsers();
+  }, []);
+
+
+
+  useEffect(() => {
+    if (!selectedUser) return;
+  
     const fetchProducts = async () => {
       try {
-        const res = await axios.get("http://localhost:5000/products");
+        const res = await axios.get(
+          `http://localhost:5000/products/${userId}/${selectedUser}`,
+          { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }
+        );
         setProducts(res.data);
       } catch (error) {
         console.error("Error fetching products:", error);
       }
     };
-
+  
     fetchProducts();
-
-    socket.on("new_product", (product) => {
-      setProducts((prev) => [...prev, product]);
-    });
-
+  
+    // new product updates
+    const handleNewProduct = (product) => {
+      if (
+        (product.senderId === userId && product.receiverId === selectedUser) ||
+        (product.senderId === selectedUser && product.receiverId === userId)
+      ) {
+        setProducts((prev) => [...prev, product]); 
+      }
+    };
+  
+    socket.on("new_product", handleNewProduct);
     socket.on("delete_product", (productId) => {
       setProducts((prev) => prev.filter((product) => product._id !== productId));
     });
-
+  
     return () => {
-      socket.off("new_product");
+      socket.off("new_product", handleNewProduct);
       socket.off("delete_product");
     };
-  }, []);
+  }, [selectedUser]);
+  
+  
 
   const handleAddProduct = () => {
-    if (!newProduct.name || !newProduct.price) {
-      alert("Please enter both name and price!");
+    if (!newProduct.name || !newProduct.price || !selectedUser) {
+      alert("Please enter product details and select a user!");
       return;
     }
-
-    socket.emit("add_product", newProduct);
+  
+    socket.emit("add_product", { ...newProduct, senderId: userId, receiverId: selectedUser });
+  
     setShowModal(false);
     setNewProduct({ name: "", price: "" });
   };
+  
 
   const handleDeleteProduct = async (id) => {
     try {
-      await axios.delete(`http://localhost:5000/products/${id}`);
+      await axios.delete(`http://localhost:5000/products/${id}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+      });
     } catch (error) {
       console.error("Error deleting product:", error);
     }
@@ -58,6 +102,7 @@ const Dashboard = () => {
 
   const handleLogout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("userId");
     window.location.reload();
   };
 
@@ -68,12 +113,25 @@ const Dashboard = () => {
         <button className="logout-btn" onClick={handleLogout}>Logout</button>
       </div>
 
+      <div className="user-selection">
+        <label>Select User:</label>
+        <select className="user-dropdown" onChange={(e) => setSelectedUser(e.target.value)}>
+          <option value="">Choose a user</option>
+          {users
+            .filter((user) => user._id !== userId) // Exclude logged-in user
+            .map((user) => (
+              <option key={user._id} value={user._id}>
+                {user.username}
+              </option>
+            ))}
+        </select>
+      </div>
+
       <div className="product-container">
         {products.length === 0 ? (
-             <p className="empty-message">
-             <i className="fas fa-box-open"></i> 
-             No products added yet
-           </p>
+          <p className="empty-message">
+            <i className="fas fa-box-open"></i> No products shared yet
+          </p>
         ) : (
           products.map((product) => (
             <div key={product._id} className="product-card">
@@ -90,7 +148,7 @@ const Dashboard = () => {
       {showModal && (
         <div className="modal-overlay">
           <div className="modal-content">
-            <h2>Add New Product</h2>
+            <h2>Add Product</h2>
             <input
               type="text"
               placeholder="Product Name"
